@@ -19,6 +19,12 @@ SUBSYS(debug)
 
 /* */
 
+#if IS_SUBSYS_ENABLED(CONFIG_CGROUP_PIDS)
+SUBSYS(pids)
+#endif
+
+/* */
+
 #if IS_SUBSYS_ENABLED(CONFIG_CGROUP_SCHED)
 SUBSYS(cpu_cgroup)
 #endif

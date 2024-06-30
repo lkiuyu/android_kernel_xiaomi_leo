@@ -65,6 +65,9 @@
 #include <linux/atomic.h>
 #include <linux/freezer.h>
 
+#define CGROUP_FILE_NAME_MAX		(MAX_CGROUP_TYPE_NAMELEN +	\
+					 MAX_CFTYPE_NAME + 2)
+
 /* css deactivation bias, makes css->refcnt negative to deny new trygets */
 #define CSS_DEACT_BIAS		INT_MIN
 
@@ -2166,8 +2169,10 @@ int subsys_cgroup_allow_attach(struct cgroup *cgrp, struct cgroup_taskset *tset)
 	cgroup_taskset_for_each(task, cgrp, tset) {
 		tcred = __task_cred(task);
 
-		if (current != task && cred->euid != tcred->uid &&
-		    cred->euid != tcred->suid)
+		//if (current != task && cred->euid != tcred->uid &&
+		    //cred->euid != tcred->suid)
+			//return -EACCES;
+		if (current != task && !uid_eq(cred->euid, tcred->uid) &&!uid_eq(cred->euid, tcred->suid))
 			return -EACCES;
 	}
 
@@ -2775,6 +2780,10 @@ static int cgroup_add_file(struct cgroup *cgrp, struct cgroup_subsys *subsys,
 		strcat(name, ".");
 	}
 	strcat(name, cft->name);
+	
+	if (subsys && (cgrp->root->flags & CGRP_ROOT_NOPREFIX) && !(cft->flags & CFTYPE_NO_PREFIX)) {
+				snprintf(name, CGROUP_FILE_NAME_MAX, "%s.%s", subsys->name, cft->name);
+	}
 
 	BUG_ON(!mutex_is_locked(&dir->d_inode->i_mutex));
 
@@ -2802,6 +2811,8 @@ static int cgroup_add_file(struct cgroup *cgrp, struct cgroup_subsys *subsys,
 	dput(dentry);
 out:
 	kfree(cfe);
+	
+	
 	return error;
 }
 

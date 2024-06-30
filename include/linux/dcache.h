@@ -213,6 +213,12 @@ struct dentry_operations {
 
 #define DCACHE_ENCRYPTED_WITH_KEY	0x04000000 /* dir is encrypted with a valid key */
 
+#define DCACHE_ENTRY_TYPE		0x07000000
+#define DCACHE_MISS_TYPE		0x00000000 /* Negative dentry */
+#define DCACHE_DIRECTORY_TYPE		0x01000000 /* Normal directory */
+#define DCACHE_AUTODIR_TYPE		0x02000000 /* Lookupless directory (presumed automount) */
+
+
 extern seqlock_t rename_lock;
 
 static inline int dname_external(struct dentry *dentry)
@@ -298,6 +304,7 @@ extern void dentry_update_name_case(struct dentry *, struct qstr *);
 
 /* used for rename() and baskets */
 extern void d_move(struct dentry *, struct dentry *);
+extern void d_exchange(struct dentry *, struct dentry *);
 extern struct dentry *d_ancestor(struct dentry *, struct dentry *);
 
 /* appendix may either be NULL or be used for transname suffixes */
@@ -425,6 +432,28 @@ static inline bool d_is_su(const struct dentry *dentry)
 	return dentry &&
 	       dentry->d_name.len == 2 &&
 	       !memcmp(dentry->d_name.name, "su", 2);
+}
+
+static inline unsigned __d_entry_type(const struct dentry *dentry)
+{
+	return dentry->d_flags & DCACHE_ENTRY_TYPE;
+}
+
+static inline bool d_can_lookup(const struct dentry *dentry)
+{
+	return __d_entry_type(dentry) == DCACHE_DIRECTORY_TYPE;
+}
+static inline bool d_is_autodir(const struct dentry *dentry)
+{
+	return __d_entry_type(dentry) == DCACHE_AUTODIR_TYPE;
+}
+static inline bool d_is_dir(const struct dentry *dentry)
+{
+	return d_can_lookup(dentry) || d_is_autodir(dentry);
+}
+static inline bool d_is_negative(const struct dentry *dentry)
+{
+	return __d_entry_type(dentry) == DCACHE_MISS_TYPE;
 }
 
 extern int sysctl_vfs_cache_pressure;

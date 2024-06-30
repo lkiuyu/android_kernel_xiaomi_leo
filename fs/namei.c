@@ -2264,6 +2264,18 @@ static inline int check_sticky(struct inode *dir, struct inode *inode)
 	return !capable_wrt_inode_uidgid(inode, CAP_FOWNER);
 }
 
+int __check_sticky(struct inode *dir, struct inode *inode)
+{
+	kuid_t fsuid = current_fsuid();
+
+	if (uid_eq(inode->i_uid, fsuid))
+		return 0;
+	if (uid_eq(dir->i_uid, fsuid))
+		return 0;
+	return !inode_capable(inode, CAP_FOWNER);
+}
+EXPORT_SYMBOL(__check_sticky);
+
 /*
  *	Check whether we can remove a link victim from directory dir, check
  *  whether the type of victim is right.
@@ -2315,6 +2327,42 @@ static int may_delete(struct vfsmount *mnt, struct inode *dir,struct dentry *vic
 	return 0;
 }
 
+
+static int may_delete2(struct inode *dir, struct dentry *victim, bool isdir)
+{
+	struct inode *inode = victim->d_inode;
+	int error;
+
+	if (d_is_negative(victim))
+		return -ENOENT;
+	BUG_ON(!inode);
+
+	BUG_ON(victim->d_parent->d_inode != dir);
+	audit_inode_child(dir, victim, AUDIT_TYPE_CHILD_DELETE);
+
+	error = inode_permission(dir, MAY_WRITE | MAY_EXEC);
+	if (error)
+		return error;
+	if (IS_APPEND(dir))
+		return -EPERM;
+
+	if (check_sticky(dir, inode) || IS_APPEND(inode) ||
+	    IS_IMMUTABLE(inode) || IS_SWAPFILE(inode))
+		return -EPERM;
+	if (isdir) {
+		if (!d_is_dir(victim))
+			return -ENOTDIR;
+		if (IS_ROOT(victim))
+			return -EBUSY;
+	} else if (d_is_dir(victim))
+		return -EISDIR;
+	if (IS_DEADDIR(dir))
+		return -ENOENT;
+	if (victim->d_flags & DCACHE_NFSFS_RENAMED)
+		return -EBUSY;
+	return 0;
+}
+
 /*	Check whether we can create an object with dentry child in directory
  *  dir.
  *  1. We can't do it if child already exists (open has special treatment for
@@ -2331,6 +2379,15 @@ static inline int may_create(struct vfsmount *mnt, struct inode *dir, struct den
 	if (IS_DEADDIR(dir))
 		return -ENOENT;
 	return inode_permission2(mnt, dir, MAY_WRITE | MAY_EXEC);
+}
+static inline int may_create2(struct inode *dir, struct dentry *child)
+{
+	audit_inode_child(dir, child, AUDIT_TYPE_CHILD_CREATE);
+	if (child->d_inode)
+		return -EEXIST;
+	if (IS_DEADDIR(dir))
+		return -ENOENT;
+	return inode_permission(dir, MAY_WRITE | MAY_EXEC);
 }
 
 /*
@@ -3545,6 +3602,43 @@ SYSCALL_DEFINE1(rmdir, const char __user *, pathname)
 	return do_rmdir(AT_FDCWD, pathname);
 }
 
+int vfs_unlink3(struct inode *dir, struct dentry *dentry, struct inode **delegated_inode)
+{
+	struct inode *target = dentry->d_inode;
+	int error = may_delete2(dir, dentry, 0);
+
+	if (error)
+		return error;
+
+	if (!dir->i_op->unlink)
+		return -EPERM;
+
+	mutex_lock(&target->i_mutex);
+	if (d_mountpoint(dentry))
+		error = -EBUSY;
+	else {
+		error = security_inode_unlink(dir, dentry);
+		if (!error) {
+			error = try_break_deleg(target, delegated_inode);
+			if (error)
+				goto out;
+			error = dir->i_op->unlink(dir, dentry);
+			if (!error)
+				dont_mount(dentry);
+		}
+	}
+out:
+	mutex_unlock(&target->i_mutex);
+
+	/* We don't d_delete() NFS sillyrenamed files--they still exist. */
+	if (!error && !(dentry->d_flags & DCACHE_NFSFS_RENAMED)) {
+		fsnotify_link_count(target);
+		d_delete(dentry);
+	}
+
+	return error;
+}
+EXPORT_SYMBOL(vfs_unlink3);
 int vfs_unlink2(struct vfsmount *mnt, struct inode *dir, struct dentry *dentry)
 {
 	int error = may_delete(mnt, dir, dentry, 0);
@@ -3728,6 +3822,54 @@ SYSCALL_DEFINE2(symlink, const char __user *, oldname, const char __user *, newn
 {
 	return sys_symlinkat(oldname, AT_FDCWD, newname);
 }
+
+int vfs_link3(struct dentry *old_dentry, struct inode *dir, struct dentry *new_dentry, struct inode **delegated_inode)
+{
+	struct inode *inode = old_dentry->d_inode;
+	unsigned max_links = dir->i_sb->s_max_links;
+	int error;
+
+	if (!inode)
+		return -ENOENT;
+
+	error = may_create2(dir, new_dentry);
+	if (error)
+		return error;
+
+	if (dir->i_sb != inode->i_sb)
+		return -EXDEV;
+
+	/*
+	 * A link to an append-only or immutable file cannot be created.
+	 */
+	if (IS_APPEND(inode) || IS_IMMUTABLE(inode))
+		return -EPERM;
+	if (!dir->i_op->link)
+		return -EPERM;
+	if (S_ISDIR(inode->i_mode))
+		return -EPERM;
+
+	error = security_inode_link(old_dentry, dir, new_dentry);
+	if (error)
+		return error;
+
+	mutex_lock(&inode->i_mutex);
+	/* Make sure we don't allow creating hardlink to an unlinked file */
+	if (inode->i_nlink == 0)
+		error =  -ENOENT;
+	else if (max_links && inode->i_nlink >= max_links)
+		error = -EMLINK;
+	else {
+		error = try_break_deleg(inode, delegated_inode);
+		if (!error)
+			error = dir->i_op->link(old_dentry, dir, new_dentry);
+	}
+	mutex_unlock(&inode->i_mutex);
+	if (!error)
+		fsnotify_link(dir, inode, new_dentry);
+	return error;
+}
+EXPORT_SYMBOL(vfs_link3);
 
 int vfs_link2(struct vfsmount *mnt, struct dentry *old_dentry, struct inode *dir, struct dentry *new_dentry)
 {
@@ -3972,6 +4114,143 @@ out:
 	return error;
 }
 
+
+
+int vfs_rename3(struct inode *old_dir, struct dentry *old_dentry,
+	       struct inode *new_dir, struct dentry *new_dentry,
+	       struct inode **delegated_inode, unsigned int flags)
+{
+	int error;
+	bool is_dir = d_is_dir(old_dentry);
+	const unsigned char *old_name;
+	struct inode *source = old_dentry->d_inode;
+	struct inode *target = new_dentry->d_inode;
+	bool new_is_dir = false;
+	unsigned max_links = new_dir->i_sb->s_max_links;
+	iop_rename2_t rename2;
+
+	if (source == target)
+		return 0;
+
+	error = may_delete2(old_dir, old_dentry, is_dir);
+	if (error)
+		return error;
+
+	if (!target) {
+		error = may_create2(new_dir, new_dentry);
+	} else {
+		new_is_dir = d_is_dir(new_dentry);
+
+		if (!(flags & RENAME_EXCHANGE))
+			error = may_delete2(new_dir, new_dentry, is_dir);
+		else
+			error = may_delete2(new_dir, new_dentry, new_is_dir);
+	}
+	if (error)
+		return error;
+
+	rename2 = get_rename2_iop(old_dir);
+	if (!old_dir->i_op->rename && !rename2)
+		return -EPERM;
+
+	if (flags && !rename2)
+		return -EINVAL;
+
+	/*
+	 * If we are going to change the parent - check write permissions,
+	 * we'll need to flip '..'.
+	 */
+	if (new_dir != old_dir) {
+		if (is_dir) {
+			error = inode_permission(source, MAY_WRITE);
+			if (error)
+				return error;
+		}
+		if ((flags & RENAME_EXCHANGE) && new_is_dir) {
+			error = inode_permission(target, MAY_WRITE);
+			if (error)
+				return error;
+		}
+	}
+
+	error = security_inode_rename2(old_dir, old_dentry, new_dir, new_dentry,
+				      flags);
+	if (error)
+		return error;
+
+	old_name = fsnotify_oldname_init(old_dentry->d_name.name);
+	dget(new_dentry);
+	if (!is_dir || (flags & RENAME_EXCHANGE))
+		lock_two_nondirectories(source, target);
+	else if (target)
+		mutex_lock(&target->i_mutex);
+
+	error = -EBUSY;
+	if (d_mountpoint(old_dentry) || d_mountpoint(new_dentry))
+		goto out;
+
+	if (max_links && new_dir != old_dir) {
+		error = -EMLINK;
+		if (is_dir && !new_is_dir && new_dir->i_nlink >= max_links)
+			goto out;
+		if ((flags & RENAME_EXCHANGE) && !is_dir && new_is_dir &&
+		    old_dir->i_nlink >= max_links)
+			goto out;
+	}
+	if (is_dir && !(flags & RENAME_EXCHANGE) && target)
+		shrink_dcache_parent(new_dentry);
+	if (!is_dir) {
+		error = try_break_deleg(source, delegated_inode);
+		if (error)
+			goto out;
+	}
+	if (target && !new_is_dir) {
+		error = try_break_deleg(target, delegated_inode);
+		if (error)
+			goto out;
+	}
+	if (!rename2) {
+		error = old_dir->i_op->rename(old_dir, old_dentry,
+					      new_dir, new_dentry);
+	} else {
+		//WARN_ON(old_dir->i_op->rename != NULL);
+		error = rename2(old_dir, old_dentry,
+				new_dir, new_dentry, flags);
+	}
+	if (error)
+		goto out;
+
+	if (!(flags & RENAME_EXCHANGE) && target) {
+		if (is_dir)
+			target->i_flags |= S_DEAD;
+		dont_mount(new_dentry);
+	}
+	if (!(old_dir->i_sb->s_type->fs_flags & FS_RENAME_DOES_D_MOVE)) {
+		if (!(flags & RENAME_EXCHANGE))
+			d_move(old_dentry, new_dentry);
+		else
+			d_exchange(old_dentry, new_dentry);
+	}
+out:
+	if (!is_dir || (flags & RENAME_EXCHANGE))
+		unlock_two_nondirectories(source, target);
+	else if (target)
+		mutex_unlock(&target->i_mutex);
+	dput(new_dentry);
+	if (!error) {
+		fsnotify_move(old_dir, new_dir, old_name, is_dir,
+			      !(flags & RENAME_EXCHANGE) ? target : NULL, old_dentry);
+		if (flags & RENAME_EXCHANGE) {
+			fsnotify_move(new_dir, old_dir, old_dentry->d_name.name,
+				      new_is_dir, NULL, new_dentry);
+		}
+	}
+	fsnotify_oldname_free(old_name);
+
+	return error;
+}
+EXPORT_SYMBOL(vfs_rename3);
+
 int vfs_rename2(struct vfsmount *mnt,
 	       struct inode *old_dir, struct dentry *old_dentry,
 	       struct inode *new_dir, struct dentry *new_dentry)
@@ -4131,6 +4410,20 @@ SYSCALL_DEFINE2(rename, const char __user *, oldname, const char __user *, newna
 	return sys_renameat(AT_FDCWD, oldname, AT_FDCWD, newname);
 }
 
+int vfs_whiteout(struct inode *dir, struct dentry *dentry)
+{
+	int error = may_create2(dir, dentry);
+	if (error)
+		return error;
+
+	if (!dir->i_op->mknod)
+		return -EPERM;
+
+	return dir->i_op->mknod(dir, dentry,
+				S_IFCHR | WHITEOUT_MODE, WHITEOUT_DEV);
+}
+EXPORT_SYMBOL(vfs_whiteout);
+
 int vfs_readlink(struct dentry *dentry, char __user *buffer, int buflen, const char *link)
 {
 	int len;
@@ -4261,7 +4554,6 @@ int page_symlink(struct inode *inode, const char *symname, int len)
 	return __page_symlink(inode, symname, len,
 			!(mapping_gfp_mask(inode->i_mapping) & __GFP_FS));
 }
-
 const struct inode_operations page_symlink_inode_operations = {
 	.readlink	= generic_readlink,
 	.follow_link	= page_follow_link_light,

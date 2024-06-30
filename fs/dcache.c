@@ -2306,6 +2306,72 @@ static void __d_move(struct dentry * dentry, struct dentry * target)
 	spin_unlock(&dentry->d_lock);
 }
 
+static void __d_move2(struct dentry *dentry, struct dentry *target,
+		     bool exchange)
+{
+	if (!dentry->d_inode)
+		printk(KERN_WARNING "VFS: moving negative dcache entry\n");
+
+	BUG_ON(d_ancestor(dentry, target));
+	BUG_ON(d_ancestor(target, dentry));
+
+	dentry_lock_for_move(dentry, target);
+
+	write_seqcount_begin(&dentry->d_seq);
+	write_seqcount_begin(&target->d_seq);
+
+	/* __d_drop does write_seqcount_barrier, but they're OK to nest. */
+
+	/*
+	 * Move the dentry to the target hash queue. Don't bother checking
+	 * for the same hash queue because of how unlikely it is.
+	 */
+	__d_drop(dentry);
+	__d_rehash(dentry, d_hash(target->d_parent, target->d_name.hash));
+
+	/*
+	 * Unhash the target (d_delete() is not usable here).  If exchanging
+	 * the two dentries, then rehash onto the other's hash queue.
+	 */
+	__d_drop(target);
+	if (exchange) {
+		__d_rehash(target,
+			   d_hash(dentry->d_parent, dentry->d_name.hash));
+	}
+
+	list_del(&dentry->d_child);
+	list_del(&target->d_child);
+
+
+	/* Switch the names.. */
+	switch_names(dentry, target);
+	swap(dentry->d_name.hash, target->d_name.hash);
+
+	/* ... and switch the parents */
+	if (IS_ROOT(dentry)) {
+		dentry->d_parent = target->d_parent;
+		target->d_parent = target;
+		INIT_LIST_HEAD(&target->d_child);
+	} else {
+		swap(dentry->d_parent, target->d_parent);
+
+		/* And add them back to the (new) parent lists */
+		list_add(&target->d_child, &target->d_parent->d_subdirs);
+	}
+
+	list_add(&dentry->d_child, &dentry->d_parent->d_subdirs);
+
+	write_seqcount_end(&target->d_seq);
+	write_seqcount_end(&dentry->d_seq);
+
+	dentry_unlock_parents_for_move(dentry, target);
+	if (exchange)
+		fsnotify_d_move(target);
+	spin_unlock(&target->d_lock);
+	fsnotify_d_move(dentry);
+	spin_unlock(&dentry->d_lock);
+}
+
 /*
  * d_move - move a dentry
  * @dentry: entry to move
@@ -2322,6 +2388,26 @@ void d_move(struct dentry *dentry, struct dentry *target)
 	write_sequnlock(&rename_lock);
 }
 EXPORT_SYMBOL(d_move);
+
+/*
+ * d_exchange - exchange two dentries
+ * @dentry1: first dentry
+ * @dentry2: second dentry
+ */
+void d_exchange(struct dentry *dentry1, struct dentry *dentry2)
+{
+	write_seqlock(&rename_lock);
+
+	WARN_ON(!dentry1->d_inode);
+	WARN_ON(!dentry2->d_inode);
+	WARN_ON(IS_ROOT(dentry1));
+	WARN_ON(IS_ROOT(dentry2));
+
+	__d_move2(dentry1, dentry2, true);
+
+	write_sequnlock(&rename_lock);
+}
+
 
 /**
  * d_ancestor - search for an ancestor

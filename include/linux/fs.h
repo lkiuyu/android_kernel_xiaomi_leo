@@ -67,6 +67,11 @@ typedef int (get_block_t)(struct inode *inode, sector_t iblock,
 typedef void (dio_iodone_t)(struct kiocb *iocb, loff_t offset,
 			ssize_t bytes, void *private, int ret,
 			bool is_async);
+			
+			
+#define RENAME_NOREPLACE	(1 << 0)	/* Don't overwrite target */
+#define RENAME_EXCHANGE		(1 << 1)	/* Exchange source and dest */
+#define RENAME_WHITEOUT		(1 << 2)	/* Whiteout source */
 
 #define MAY_EXEC		0x00000001
 #define MAY_WRITE		0x00000002
@@ -219,6 +224,13 @@ typedef void (dio_iodone_t)(struct kiocb *iocb, loff_t offset,
 #define ATTR_KILL_PRIV	(1 << 14)
 #define ATTR_OPEN	(1 << 15) /* Truncating from open(O_TRUNC) */
 #define ATTR_TIMES_SET	(1 << 16)
+
+/*
+ * Whiteout is represented by a char device.  The following constants define the
+ * mode and device number to use.
+ */
+#define WHITEOUT_MODE 0
+#define WHITEOUT_DEV 0
 
 /*
  * This is the Inode Attributes structure, used for notify_change().  It
@@ -678,6 +690,9 @@ enum inode_i_mutex_lock_class
 	I_MUTEX_XATTR,
 	I_MUTEX_QUOTA
 };
+
+void lock_two_nondirectories(struct inode *, struct inode*);
+void unlock_two_nondirectories(struct inode *, struct inode*);
 
 /*
  * NOTE: in a 32bit arch with a preemptable kernel and
@@ -1360,6 +1375,37 @@ struct super_block {
 	int s_stack_depth;
 };
 
+extern const unsigned super_block_wrapper_version;
+struct super_block_wrapper {
+	struct super_block sb;
+
+	/* -- Wrapper version 0 -- */
+	/*
+	 * Indicates how deep in a filesystem stack this SB is
+	 */
+	int s_stack_depth;
+
+	/* -- Wrapper version 1 -- */
+};
+
+static inline struct super_block_wrapper *get_sb_wrapper(struct super_block *sb,
+							 unsigned version)
+{
+	/* Make sure we get a link failure if this function is used against an
+	 * older kernel that doesn't have the superblock wrapper.
+	 */
+	if (super_block_wrapper_version < version)
+		return NULL;
+	return container_of(sb, struct super_block_wrapper, sb);
+}
+
+static inline int *get_s_stack_depth(struct super_block *sb)
+{
+	struct super_block_wrapper *wrapper = get_sb_wrapper(sb, 0);
+	return wrapper ? &wrapper->s_stack_depth : NULL;
+}
+
+
 /* superblock cache pruning functions */
 extern void prune_icache_sb(struct super_block *sb, int nr_to_scan);
 extern void prune_dcache_sb(struct super_block *sb, int nr_to_scan);
@@ -1495,12 +1541,17 @@ extern int vfs_mknod2(struct vfsmount *, struct inode *, struct dentry *, umode_
 extern int vfs_symlink(struct inode *, struct dentry *, const char *);
 extern int vfs_link(struct dentry *, struct inode *, struct dentry *);
 extern int vfs_link2(struct vfsmount *, struct dentry *, struct inode *, struct dentry *);
+extern int vfs_link3(struct dentry *, struct inode *, struct dentry *, struct inode **);
 extern int vfs_rmdir(struct inode *, struct dentry *);
 extern int vfs_rmdir2(struct vfsmount *, struct inode *, struct dentry *);
 extern int vfs_unlink(struct inode *, struct dentry *);
 extern int vfs_unlink2(struct vfsmount *, struct inode *, struct dentry *);
+extern int vfs_unlink3(struct inode *, struct dentry *, struct inode **);
 extern int vfs_rename(struct inode *, struct dentry *, struct inode *, struct dentry *);
 extern int vfs_rename2(struct vfsmount *, struct inode *, struct dentry *, struct inode *, struct dentry *);
+extern int vfs_rename3(struct inode *, struct dentry *, struct inode *, struct dentry *, struct inode **, unsigned int);
+
+extern int vfs_whiteout(struct inode *, struct dentry *);
 
 /*
  * VFS dentry helper functions.
@@ -1636,6 +1687,24 @@ struct inode_operations {
 	int (*tmpfile) (struct inode *, struct dentry *, umode_t);
 } ____cacheline_aligned;
 
+typedef int (*iop_rename2_t) (struct inode *, struct dentry *,
+			      struct inode *, struct dentry *, unsigned int);
+
+typedef int (*iop_dentry_open_t) (struct dentry *, struct file *, const struct cred *);
+
+struct inode_operations_wrapper {
+	struct inode_operations ops;
+	unsigned version;
+	/* -- Wrapper version 0 -- */
+	int (*rename2) (struct inode *, struct dentry *,
+			struct inode *, struct dentry *, unsigned int);
+
+	/* WARNING: probably going away soon, do not use! */
+	int (*dentry_open)(struct dentry *, struct file *, const struct cred *);
+
+	/* -- Wrapper version 1 -- */
+} ____cacheline_aligned;
+
 ssize_t rw_copy_check_uvector(int type, const struct iovec __user * uvector,
 			      unsigned long nr_segs, unsigned long fast_segs,
 			      struct iovec *fast_pointer,
@@ -1697,6 +1766,7 @@ struct super_operations {
 #define S_IMA		1024	/* Inode has an associated IMA struct */
 #define S_AUTOMOUNT	2048	/* Automount/referral quasi-directory */
 #define S_NOSEC		4096	/* no suid or xattr security attributes */
+#define S_IOPS_WRAPPER	8192	/* i_op points to struct inode_operations_wrapper */
 
 /*
  * Note that nosuid etc flags are inode-specific: setting some file-system
@@ -1734,6 +1804,11 @@ struct super_operations {
 #define IS_IMA(inode)		((inode)->i_flags & S_IMA)
 #define IS_AUTOMOUNT(inode)	((inode)->i_flags & S_AUTOMOUNT)
 #define IS_NOSEC(inode)		((inode)->i_flags & S_NOSEC)
+
+#define IS_IOPS_WRAPPER(inode)	((inode)->i_flags & S_IOPS_WRAPPER)
+
+#define IS_WHITEOUT(inode)	(S_ISCHR(inode->i_mode) && \
+				 (inode)->i_rdev == WHITEOUT_DEV)
 
 /*
  * Inode state bits.  Protected by inode->i_lock
@@ -2100,6 +2175,7 @@ extern struct file *file_open_name(struct filename *, int, umode_t);
 extern struct file *filp_open(const char *, int, umode_t);
 extern struct file *file_open_root(struct dentry *, struct vfsmount *,
 				   const char *, int);
+extern int vfs_open(const struct path *, struct file *, const struct cred *);
 extern struct file * dentry_open(const struct path *, int, const struct cred *);
 extern int filp_close(struct file *, fl_owner_t id);
 
@@ -2306,9 +2382,13 @@ extern sector_t bmap(struct inode *, sector_t);
 #endif
 extern int notify_change(struct dentry *, struct iattr *);
 extern int notify_change2(struct vfsmount *, struct dentry *, struct iattr *);
+extern int notify_change3(struct dentry *, struct iattr *, struct inode **);
+
 extern int inode_permission(struct inode *, int);
 extern int inode_permission2(struct vfsmount *, struct inode *, int);
+extern int __inode_permission(struct inode *, int);
 extern int generic_permission(struct inode *, int);
+extern int __check_sticky(struct inode *dir, struct inode *inode);
 
 static inline bool execute_ok(struct inode *inode)
 {
@@ -2422,6 +2502,18 @@ static inline int generic_drop_inode(struct inode *inode)
 	return !inode->i_nlink || inode_unhashed(inode);
 }
 
+static inline int try_break_deleg(struct inode *inode, struct inode **delegated_inode)
+{
+	int ret;
+
+	ret = break_deleg(inode, O_WRONLY|O_NONBLOCK);
+	if (ret == -EWOULDBLOCK && delegated_inode) {
+		*delegated_inode = inode;
+		ihold(inode);
+	}
+	return ret;
+}
+
 extern struct inode *ilookup5_nowait(struct super_block *sb,
 		unsigned long hashval, int (*test)(struct inode *, void *),
 		void *data);
@@ -2509,7 +2601,9 @@ extern ssize_t generic_file_splice_write(struct pipe_inode_info *,
 		struct file *, loff_t *, size_t, unsigned int);
 extern ssize_t generic_splice_sendpage(struct pipe_inode_info *pipe,
 		struct file *out, loff_t *, size_t len, unsigned int flags);
-
+extern long do_splice_direct(struct file *in, loff_t *ppos, struct file *out,
+		loff_t *opos, size_t len, unsigned int flags);
+		
 extern void
 file_ra_state_init(struct file_ra_state *ra, struct address_space *mapping);
 extern loff_t noop_llseek(struct file *file, loff_t offset, int whence);
@@ -2782,11 +2876,42 @@ static inline int is_sxid(umode_t mode)
 {
 	return (mode & S_ISUID) || ((mode & S_ISGID) && (mode & S_IXGRP));
 }
+static inline int check_sticky2(struct inode *dir, struct inode *inode)
+{
+	if (!(dir->i_mode & S_ISVTX))
+		return 0;
 
+	return __check_sticky(dir, inode);
+}
 static inline void inode_has_no_xattr(struct inode *inode)
 {
 	if (!is_sxid(inode->i_mode) && (inode->i_sb->s_flags & MS_NOSEC))
 		inode->i_flags |= S_NOSEC;
+}
+
+static inline const struct inode_operations_wrapper *get_iop_wrapper(struct inode *inode,
+								     unsigned version)
+{
+	const struct inode_operations_wrapper *wrapper;
+		
+	if (!IS_IOPS_WRAPPER(inode))
+		return NULL;
+	wrapper = container_of(inode->i_op, const struct inode_operations_wrapper, ops);
+	if (wrapper->version < version)
+		return NULL;
+	return wrapper;
+}
+
+static inline iop_rename2_t get_rename2_iop(struct inode *inode)
+{
+	const struct inode_operations_wrapper *wrapper = get_iop_wrapper(inode, 0);
+	return wrapper ? wrapper->rename2 : NULL;
+}
+
+static inline iop_dentry_open_t get_dentry_open_iop(struct inode *inode)
+{
+	const struct inode_operations_wrapper *wrapper = get_iop_wrapper(inode, 0);
+	return wrapper ? wrapper->dentry_open : NULL;
 }
 
 #endif /* _LINUX_FS_H */

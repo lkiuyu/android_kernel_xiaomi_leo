@@ -1463,6 +1463,10 @@ struct task_struct {
 	/* cg_list protected by css_set_lock and tsk->alloc_lock */
 	struct list_head cg_list;
 #endif
+#ifdef CONFIG_CGROUP_PIDS
+	struct list_head group_pids_list;
+	struct group_pids *group_pids;
+#endif
 #ifdef CONFIG_FUTEX
 	struct robust_list_head __user *robust_list;
 #ifdef CONFIG_COMPAT
@@ -1653,10 +1657,12 @@ static inline pid_t task_tgid_nr(struct task_struct *tsk)
 	return tsk->tgid;
 }
 
-static inline pid_t task_tgid_nr_ns(struct task_struct *tsk, struct pid_namespace *ns)
-{
-	return __task_pid_nr_ns(tsk, __PIDTYPE_TGID, ns);
-}
+//static inline pid_t task_tgid_nr_ns(struct task_struct *tsk, struct pid_namespace *ns)
+//{
+	//return __task_pid_nr_ns(tsk, __PIDTYPE_TGID, ns);
+//}
+
+pid_t task_tgid_nr_ns(struct task_struct *tsk, struct pid_namespace *ns);
 
 static inline pid_t task_tgid_vnr(struct task_struct *tsk)
 {

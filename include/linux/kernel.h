@@ -440,6 +440,27 @@ extern enum system_states {
 #define TAINT_CRAP			10
 #define TAINT_FIRMWARE_WORKAROUND	11
 #define TAINT_OOT_MODULE		12
+#define TAINT_13			13
+#define TAINT_14			14
+#define TAINT_15			15
+#define TAINT_16			16
+#define TAINT_17			17
+#define TAINT_18			18
+#define TAINT_19			19
+#define TAINT_20			20
+#define TAINT_21			21
+#define TAINT_22			22
+#define TAINT_23			23
+#define TAINT_24			24
+#define TAINT_25			25
+#define TAINT_26			26
+#define TAINT_27			27
+/* Reserving bits for vendor specific uses */
+#define TAINT_HARDWARE_UNSUPPORTED	28
+#define TAINT_TECH_PREVIEW		29
+/* Bits 30 - 31 are reserved for Red Hat use only */
+#define TAINT_RESERVED30		30
+#define TAINT_RESERVED31		31
 
 extern const char hex_asc[];
 #define hex_asc_lo(x)	hex_asc[((x) & 0x0f)]
@@ -804,5 +825,10 @@ static inline void ftrace_dump(enum ftrace_dump_mode oops_dump_mode) { }
 
 /* To identify board information in panic logs, set this */
 extern char *mach_panic_string;
+
+struct module;
+
+void mark_hardware_unsupported(const char *msg);
+void mark_tech_preview(const char *msg, struct module *mod);
 
 #endif

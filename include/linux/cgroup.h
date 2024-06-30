@@ -21,6 +21,7 @@
 #include <linux/xattr.h>
 #include <linux/fs.h>
 
+
 #ifdef CONFIG_CGROUPS
 
 struct cgroupfs_root;
@@ -30,24 +31,14 @@ struct cgroup;
 struct css_id;
 struct eventfd_ctx;
 
-extern int cgroup_init_early(void);
-extern int cgroup_init(void);
-extern void cgroup_fork(struct task_struct *p);
-extern void cgroup_post_fork(struct task_struct *p);
-extern void cgroup_exit(struct task_struct *p, int run_callbacks);
-extern int cgroupstats_build(struct cgroupstats *stats,
-				struct dentry *dentry);
-extern int cgroup_load_subsys(struct cgroup_subsys *ss);
-extern void cgroup_unload_subsys(struct cgroup_subsys *ss);
-
-extern int proc_cgroup_show(struct seq_file *, void *);
-
 /*
  * Define the enumeration of all cgroup subsystems.
  *
  * We define ids for builtin subsystems and then modular ones.
  */
 #define SUBSYS(_x) _x ## _subsys_id,
+#define SUBSYS_TAG(_t) CGROUP_ ## _t, \
+	__unused_tag_ ## _t = CGROUP_ ## _t - 1,
 enum cgroup_subsys_id {
 #define IS_SUBSYS_ENABLED(option) IS_BUILTIN(option)
 #include <linux/cgroup_subsys.h>
@@ -55,13 +46,30 @@ enum cgroup_subsys_id {
 	CGROUP_BUILTIN_SUBSYS_COUNT,
 
 	__CGROUP_SUBSYS_TEMP_PLACEHOLDER = CGROUP_BUILTIN_SUBSYS_COUNT - 1,
-
+#undef SUBSYS_TAG
 #define IS_SUBSYS_ENABLED(option) IS_MODULE(option)
+#define ENABLE_NETPRIO_NOW
 #include <linux/cgroup_subsys.h>
+#undef ENABLE_NETPRIO_NOW
 #undef IS_SUBSYS_ENABLED
 	CGROUP_SUBSYS_COUNT,
 };
 #undef SUBSYS
+
+
+extern int cgroup_init_early(void);
+extern int cgroup_init(void);
+extern void cgroup_fork(struct task_struct *p);
+
+extern void cgroup_post_fork(struct task_struct *p);
+
+extern void cgroup_exit(struct task_struct *p, int run_callbacks);
+extern int cgroupstats_build(struct cgroupstats *stats,
+				struct dentry *dentry);
+extern int cgroup_load_subsys(struct cgroup_subsys *ss);
+extern void cgroup_unload_subsys(struct cgroup_subsys *ss);
+
+extern int proc_cgroup_show(struct seq_file *, void *);
 
 /* Per-subsystem/per-cgroup state maintained by the system. */
 struct cgroup_subsys_state {
@@ -396,6 +404,7 @@ struct cgroup_map_cb {
 /* cftype->flags */
 #define CFTYPE_ONLY_ON_ROOT	(1U << 0)	/* only create on root cg */
 #define CFTYPE_NOT_ON_ROOT	(1U << 1)	/* don't create on root cg */
+#define CFTYPE_NO_PREFIX	(1U << 3)	/* (DON'T USE FOR NEW FILES) no subsys prefix */
 #define CFTYPE_INSANE		(1U << 2)	/* don't create if sane_behavior */
 
 #define MAX_CFTYPE_NAME		64
@@ -714,6 +723,32 @@ static inline struct cgroup* task_cgroup(struct task_struct *task,
 }
 
 /**
+ * task_get_css - find and get the css for (task, subsys)
+ * @task: the target task
+ * @subsys_id: the target subsystem ID
+ *
+ * Find the css for the (@task, @subsys_id) combination, increment a
+ * reference on and return it.  This function is guaranteed to return a
+ * valid css.
+ */
+static inline struct cgroup_subsys_state *
+task_get_css(struct task_struct *task, int subsys_id)
+{
+	struct cgroup_subsys_state *css;
+
+	rcu_read_lock();
+	while (true) {
+		css = task_subsys_state(task, subsys_id);
+		if (likely(css_tryget(css)))
+			break;
+		cpu_relax();
+	}
+	rcu_read_unlock();
+	return css;
+}
+
+
+/**
  * cgroup_for_each_child - iterate through children of a cgroup
  * @pos: the cgroup * to use as the loop cursor
  * @cgroup: cgroup whose children to walk
@@ -882,10 +917,13 @@ int subsys_cgroup_allow_attach(struct cgroup *cgrp,
 
 #else /* !CONFIG_CGROUPS */
 
+
 static inline int cgroup_init_early(void) { return 0; }
 static inline int cgroup_init(void) { return 0; }
 static inline void cgroup_fork(struct task_struct *p) {}
+
 static inline void cgroup_post_fork(struct task_struct *p) {}
+
 static inline void cgroup_exit(struct task_struct *p, int callbacks) {}
 
 static inline void cgroup_lock(void) {}

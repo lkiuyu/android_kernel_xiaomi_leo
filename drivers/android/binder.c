@@ -3115,7 +3115,7 @@ retry:
 		}
 		trd->code = t->code;
 		trd->flags = t->flags;
-		trd->sender_euid = t->sender_euid;
+		trd->sender_euid = t->sender_euid.val;
 
 		if (t->from) {
 			struct task_struct *sender = t->from->proc->tsk;
@@ -3432,12 +3432,12 @@ static int binder_ioctl_set_ctx_mgr(struct file *filp,
 	ret = security_binder_set_context_mgr(proc->tsk);
 	if (ret < 0)
 		goto out;
-	if (context->binder_context_mgr_uid != -1) {
-		if (context->binder_context_mgr_uid != current->cred->euid) {
+	if (context->binder_context_mgr_uid.val != -1) {
+		if (context->binder_context_mgr_uid.val != current->cred->euid.val) {
 			binder_debug(BINDER_DEBUG_TOP_ERRORS,
 				     "binder: BINDER_SET_"
 				     "CONTEXT_MGR bad uid %d != %d\n",
-				     current->cred->euid,
+				     current->cred->euid.val,
 				     context->binder_context_mgr_uid);
 			ret = -EPERM;
 			goto out;

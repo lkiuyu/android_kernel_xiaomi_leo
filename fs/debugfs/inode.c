@@ -190,7 +190,7 @@ static int debugfs_parse_options(char *data, struct debugfs_mount_opts *opts)
 			uid = make_kuid(current_user_ns(), option);
 			if (!uid_valid(uid))
 				return -EINVAL;
-			opts->uid = uid;
+			opts->uid = uid.val;
 			break;
 		case Opt_gid:
 			if (match_int(&args[0], &option))
@@ -198,7 +198,7 @@ static int debugfs_parse_options(char *data, struct debugfs_mount_opts *opts)
 			gid = make_kgid(current_user_ns(), option);
 			if (!gid_valid(gid))
 				return -EINVAL;
-			opts->gid = gid;
+			opts->gid = gid.val;
 			break;
 		case Opt_mode:
 			if (match_octal(&args[0], &option))
@@ -263,8 +263,13 @@ static int debugfs_apply_options(struct super_block *sb)
 	inode->i_mode &= ~S_IALLUGO;
 	inode->i_mode |= opts->mode;
 
-	inode->i_uid = opts->uid;
-	inode->i_gid = opts->gid;
+	kuid_t myuid;
+	myuid.val=opts->uid;
+	kgid_t mygid;
+	mygid.val=opts->gid;
+	
+	inode->i_uid = myuid;
+	inode->i_gid = mygid;
 
 	return 0;
 }
@@ -289,12 +294,18 @@ static int debugfs_show_options(struct seq_file *m, struct dentry *root)
 	struct debugfs_fs_info *fsi = root->d_sb->s_fs_info;
 	struct debugfs_mount_opts *opts = &fsi->mount_opts;
 
-	if (!uid_eq(opts->uid, GLOBAL_ROOT_UID))
+	kuid_t myuid;
+	myuid.val=opts->uid;
+	kgid_t mygid;
+	mygid.val=opts->gid;
+
+
+	if (!uid_eq(myuid, GLOBAL_ROOT_UID))
 		seq_printf(m, ",uid=%u",
-			   from_kuid_munged(&init_user_ns, opts->uid));
-	if (!gid_eq(opts->gid, GLOBAL_ROOT_GID))
+			   from_kuid_munged(&init_user_ns, myuid));
+	if (!gid_eq(mygid, GLOBAL_ROOT_GID))
 		seq_printf(m, ",gid=%u",
-			   from_kgid_munged(&init_user_ns, opts->gid));
+			   from_kgid_munged(&init_user_ns, mygid));
 	if (opts->mode != DEBUGFS_DEFAULT_MODE)
 		seq_printf(m, ",mode=%o", opts->mode);
 	if (opts->privilege)

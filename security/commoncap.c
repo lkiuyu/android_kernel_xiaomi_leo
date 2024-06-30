@@ -83,9 +83,14 @@ int cap_capable(const struct cred *cred, struct user_namespace *targ_ns,
 	struct user_namespace *ns = targ_ns;
 
 #ifdef CONFIG_ANDROID_PARANOID_NETWORK
-	if (cap == CAP_NET_RAW && in_egroup_p(AID_NET_RAW))
+
+	kgid_t mygid1;
+	mygid1.val=AID_NET_RAW;
+	kgid_t mygid2;
+	mygid2.val=AID_NET_ADMIN;
+	if (cap == CAP_NET_RAW && in_egroup_p(mygid1))
 		return 0;
-	if (cap == CAP_NET_ADMIN && in_egroup_p(AID_NET_ADMIN))
+	if (cap == CAP_NET_ADMIN && in_egroup_p(mygid2))
 		return 0;
 #endif
 
